@@ -287,6 +287,10 @@
         function initSync() {
             onSnapshot(collection(db, "inventory"), s => {
                 inv = s.docs.map(d => ({id: d.id, ...d.data()}));
+                
+                // Sort items alphabetically by Name
+                inv.sort((a, b) => a.name.localeCompare(b.name));
+
                 const uList = document.getElementById('user-bulk-list');
                 if(uList) uList.innerHTML = inv.map(item => `<tr id="row-${item.id}" class="user-table-row"><td><input type="checkbox" class="bulk-check" data-id="${item.id}" onchange="toggleRowHighlight('${item.id}')"></td><td>${item.name}</td><td><strong>${item.stock}</strong></td><td><input type="number" id="qty-${item.id}" class="qty-input-small" value="0"></td></tr>`).join('');
                 renderAdminInv();
