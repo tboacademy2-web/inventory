@@ -33,9 +33,11 @@
         .btn-danger { background: var(--danger); color: white; width: auto; padding: 6px 12px; font-size: 11px; border-radius: 4px; }
         .btn-approve { background: var(--success); color: white; width: auto; padding: 6px 12px; font-size: 11px; border-radius: 4px; }
         .btn-edit { background: #edf2ff; color: var(--primary); width: auto; padding: 6px 12px; font-size: 11px; border: 1px solid #d0dfff; margin-right: 5px; border-radius: 4px; }
+        .btn-save-email { background: var(--success); color: white; width: auto; padding: 6px 12px; font-size: 11px; border-radius: 4px; margin-left: 5px; }
         
         .user-table-row.selected { background-color: #f0f7ff; }
         .qty-input-small { width: 80px !important; padding: 8px !important; margin: 0 !important; text-align: center; border: 1px solid #cbd5e0 !important; }
+        .email-input-inline { width: 220px !important; padding: 6px 8px !important; margin: 0 !important; font-size: 12px !important; border: 1px solid #cbd5e0 !important; }
 
         .tab-bar { display: flex; gap: 20px; margin-bottom: 20px; border-bottom: 1px solid var(--border); overflow-x: auto; }
         .tab-btn { padding: 10px 0; background: none; border: none; cursor: pointer; color: var(--text-light); border-bottom: 2px solid transparent; white-space: nowrap; }
@@ -136,7 +138,14 @@
                 <button class="tab-btn" onclick="switchTab('logs')">History</button>
                 <button class="tab-btn" onclick="switchTab('set')">Settings</button>
             </div>
-            <div id="tab-overview" class="tab-content"><div class="card"><table id="admin-dash-list"></table></div></div>
+            <div id="tab-overview" class="tab-content">
+                <div class="card" style="background:#f0f7ff; border-color:#d0dfff;">
+                    <p style="font-size:13px; color:var(--text-light);">
+                        📧 <strong>Per-Item Email Assignment:</strong> Assign an email to each item below. When the item's stock drops to 35% or below, an alert email will be sent to that assigned address with the common CC emails (set in Settings).
+                    </p>
+                </div>
+                <div class="card"><table id="admin-dash-list"></table></div>
+            </div>
             <div id="tab-team" class="tab-content" style="display:none">
                 <div class="card">
                     <h3>Register New User</h3>
@@ -168,9 +177,10 @@
             <div id="tab-set" class="tab-content" style="display:none">
                 <div class="card">
                     <h3>Settings</h3>
-                    <label>To: Email 1</label><input type="email" id="set-e1">
-                    <label>To: Email 2</label><input type="email" id="set-e2">
-                    <label>Cc: Email</label><input type="email" id="set-ecc">
+                    <p style="font-size:12px; color:gray; margin-bottom:10px;">These three emails will be added as CC to <strong>every</strong> low-stock alert email.</p>
+                    <label>CC Email 1</label><input type="email" id="set-e1">
+                    <label>CC Email 2</label><input type="email" id="set-e2">
+                    <label>CC Email 3</label><input type="email" id="set-ecc">
                     <hr style="margin:20px 0; border:0; border-top:1px solid #eee;">
                     <h3>EmailJS Integration</h3>
                     <label>Public Key</label><input type="text" id="set-key">
@@ -299,7 +309,23 @@
 
         window.toggleRowHighlight = (id) => document.getElementById(`row-${id}`).classList.toggle('selected');
 
-        // BATCH UPDATE WITH FIXED AUTOMATIC LOW STOCK ALERT
+        // SAVE PER-ITEM ASSIGNED EMAIL
+        window.saveItemEmail = async (id) => {
+            const emailField = document.getElementById(`item-email-${id}`);
+            const newEmail = emailField.value.trim();
+            try {
+                await updateDoc(doc(db, "inventory", id), { assignedEmail: newEmail });
+                const btn = document.getElementById(`save-email-btn-${id}`);
+                const originalText = btn.innerText;
+                btn.innerText = "✓ Saved";
+                btn.style.background = "#2d9e5f";
+                setTimeout(() => { btn.innerText = originalText; }, 1500);
+            } catch(e) {
+                alert("Error saving email: " + e.message);
+            }
+        };
+
+        // BATCH UPDATE WITH FIXED AUTOMATIC LOW STOCK ALERT (PER-ITEM EMAIL)
         window.submitBulkUpdate = async () => {
             const note = document.getElementById('bulk-note').value, date = document.getElementById('bulk-date').value;
             if(!note || !date) return alert("Purpose & Date required.");
@@ -310,7 +336,9 @@
             btn.disabled = true; btn.innerText = "Syncing...";
 
             const batch = writeBatch(db);
-            let itemsToAlert = [];
+            // Group low-stock items by their assigned recipient email
+            // Key = assigned email (or "" if none), Value = array of alert strings
+            let alertsByRecipient = {};
 
             for(let check of checks) {
                 const id = check.dataset.id, qty = parseInt(document.getElementById(`qty-${id}`).value);
@@ -330,7 +358,9 @@
                     
                     const pct = Math.round((newStock / (item.initial || 1)) * 100);
                     if(pct <= 35) {
-                        itemsToAlert.push(`${item.name}: ${newStock} left (${pct}%)`);
+                        const recipient = (item.assignedEmail || "").trim();
+                        if(!alertsByRecipient[recipient]) alertsByRecipient[recipient] = [];
+                        alertsByRecipient[recipient].push(`${item.name}: ${newStock} left (${pct}%)`);
                     }
                 }
             }
@@ -338,13 +368,25 @@
             try {
                 await batch.commit();
 
-                // AUTOMATIC LOW STOCK ALERT TRIGGER
-                if (itemsToAlert.length > 0 && settings.ejsSvc && settings.ejsTpl && settings.ejsKey) {
-                    const rec = [settings.e1, settings.e2, settings.ecc].filter(x=>x).join(', ');
-                    await window.emailjs.send(settings.ejsSvc, settings.ejsTpl, { 
-                        items_list: itemsToAlert.join('\n'), 
-                        to_email: rec || ADMIN_EMAIL 
-                    }, { publicKey: settings.ejsKey });
+                // AUTOMATIC LOW STOCK ALERT TRIGGER - send one email per assigned recipient
+                if (settings.ejsSvc && settings.ejsTpl && settings.ejsKey) {
+                    const ccList = [settings.e1, settings.e2, settings.ecc].filter(x => x).join(', ');
+
+                    for (const recipient in alertsByRecipient) {
+                        const itemsList = alertsByRecipient[recipient].join('\n');
+                        // If no email assigned for an item, fall back to admin email as primary recipient
+                        const toEmail = recipient || ADMIN_EMAIL;
+
+                        try {
+                            await window.emailjs.send(settings.ejsSvc, settings.ejsTpl, { 
+                                items_list: itemsList, 
+                                to_email: toEmail,
+                                cc_email: ccList
+                            }, { publicKey: settings.ejsKey });
+                        } catch(emailErr) {
+                            console.error("Email send failed for", toEmail, emailErr);
+                        }
+                    }
                 }
 
                 alert("Inventory Updated!");
@@ -357,10 +399,21 @@
 
         function renderAdminInv() {
             if(!document.getElementById('admin-dash-list')) return;
-            document.getElementById('admin-dash-list').innerHTML = `<thead><tr><th>Item</th><th>Stock</th><th>Stock %</th><th>Status</th></tr></thead><tbody>` + 
+            // OVERVIEW: now includes per-item email assignment column
+            document.getElementById('admin-dash-list').innerHTML = `<thead><tr><th>Item</th><th>Stock</th><th>Stock %</th><th>Status</th><th>Assigned Email (for low-stock alert)</th></tr></thead><tbody>` + 
                 inv.map(i => {
                     const pct = Math.round((i.stock / (i.initial||1)) * 100);
-                    return `<tr><td>${i.name}</td><td><strong>${i.stock}</strong></td><td><strong>${pct}%</strong></td><td><span class="badge badge-${pct<=35?'low':'ok'}">${pct<=35?'LOW':'OK'}</span></td></tr>`
+                    const assigned = i.assignedEmail || '';
+                    return `<tr>
+                        <td>${i.name}</td>
+                        <td><strong>${i.stock}</strong></td>
+                        <td><strong>${pct}%</strong></td>
+                        <td><span class="badge badge-${pct<=35?'low':'ok'}">${pct<=35?'LOW':'OK'}</span></td>
+                        <td>
+                            <input type="email" class="email-input-inline" id="item-email-${i.id}" value="${assigned}" placeholder="person@example.com">
+                            <button class="btn-save-email" id="save-email-btn-${i.id}" onclick="saveItemEmail('${i.id}')">Save</button>
+                        </td>
+                    </tr>`;
                 }).join('') + `</tbody>`;
             document.getElementById('admin-inv-list').innerHTML = `<thead><tr><th>Item Name</th><th>Action</th></tr></thead><tbody>` + 
                 inv.map(i => `<tr><td>${i.name}</td><td><button class="btn-edit" onclick="editItem('${i.id}')">Edit</button><button class="btn-danger" onclick="deleteItem('${i.id}')">Delete</button></td></tr>`).join('') + `</tbody>`;
@@ -385,7 +438,7 @@
         window.editItem = (id) => { const i = inv.find(x=>x.id===id); document.getElementById('create-card').style.display='none'; document.getElementById('update-card').style.display='block'; document.getElementById('edit-id').value=id; document.getElementById('edit-name').value=i.name; document.getElementById('edit-stock').value=i.stock; };
         window.cancelEdit = () => { document.getElementById('create-card').style.display='block'; document.getElementById('update-card').style.display='none'; };
         window.saveItemUpdate = async () => { await updateDoc(doc(db, "inventory", document.getElementById('edit-id').value), { name: document.getElementById('edit-name').value, stock: parseInt(document.getElementById('edit-stock').value) }); cancelEdit(); };
-        window.adminAddItem = async () => { const n = document.getElementById('add-name').value, q = parseInt(document.getElementById('add-qty').value); if(n) await addDoc(collection(db, "inventory"), { name: n, stock: q, initial: q }); };
+        window.adminAddItem = async () => { const n = document.getElementById('add-name').value, q = parseInt(document.getElementById('add-qty').value); if(n) await addDoc(collection(db, "inventory"), { name: n, stock: q, initial: q, assignedEmail: "" }); };
         
         window.signOutUser = () => signOut(auth).then(() => location.reload());
         function showScreen(id) { document.querySelectorAll('.screen').forEach(s => s.classList.remove('active')); document.getElementById(id).classList.add('active'); }
